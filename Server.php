@@ -1,5 +1,6 @@
 <?php
 
+declare(ticks = 1);
 
 namespace Wilon;
 
@@ -51,6 +52,10 @@ class Server
      * @var resource
      */
     private $mainClient;
+    /**
+     * @var bool
+     */
+    private $running = true;
 
     /**
      * MyServer constructor.
@@ -143,7 +148,7 @@ class Server
 
         $connections = [];
         $clients = [];
-        for (;;) {
+        while ($this->running) {
             // server
             if ($conn = @stream_socket_accept($server, empty($connections) ? -1 : 0, $peer)) {
                 stream_set_blocking($conn, false);
@@ -204,7 +209,6 @@ class Server
                     }
                 }
             }
-
         }
     }
 
@@ -315,6 +319,23 @@ class Server
     }
 
     /**
+     * Handle the signal
+     */
+    public function handleSignal(): void
+    {
+        pcntl_signal(SIGTERM, function () {
+            $this->running = false;
+            Process::kill($this->master->pid, SIGTERM);
+        });
+        pcntl_signal(SIGUSR1, function () {
+            Process::kill($this->master->pid, SIGUSR1);
+        });
+        pcntl_signal(SIGUSR2, function () {
+            Process::kill($this->master->pid, SIGUSR2);
+        });
+    }
+
+    /**
      * Start the wilon
      *
      * @return mixed
@@ -323,7 +344,14 @@ class Server
     {
         // Setup the master process
         $this->master->start();
+
+        // Handle signal
+        $this->handleSignal();
+
         // Handle socket wilon
         $this->handleSocket();
+
+        // wait children process end
+        Process::wait();
     }
 }

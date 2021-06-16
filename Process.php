@@ -1,8 +1,8 @@
 <?php
 
+declare(ticks = 1);
 
 namespace Wilon;
-
 
 use Log;
 
@@ -32,6 +32,16 @@ class Process
         return pcntl_wait($status);
     }
 
+    public static function signal($signo, callable $fn): bool
+    {
+        return pcntl_signal($signo, $fn);
+    }
+
+    public static function waitpid(int $pid, &$status = null, $options = null): int
+    {
+        return pcntl_waitpid($pid, $status, $options);
+    }
+
     public function start(): void
     {
         $pid = pcntl_fork();
@@ -39,7 +49,9 @@ class Process
             $this->pid = $pid;
             return ;
         }
-        // children process
-        call_user_func($this->fn);
+        // exit process
+        exit(call_user_func(
+            $this->fn)
+        );
     }
 }

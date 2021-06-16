@@ -1,8 +1,11 @@
 <?php
 
+declare(ticks = 1);
 
 namespace Wilon;
 
+
+use Log;
 
 class Manager
 {
@@ -15,6 +18,41 @@ class Manager
      * @var array
      */
     private $pids;
+    /**
+     * @var bool
+     */
+    private $running = true;
+
+    public function __construct()
+    {
+        $this->handleSignal();
+    }
+
+    public function handleSignal(): void
+    {
+        // stop all sigterm
+        pcntl_signal(SIGTERM, function () use(&$restart) {
+            $this->running = false;
+            Log::info('manager sigterm');
+            foreach ($this->pids as $pid) {
+                Process::kill($pid, SIGTERM);
+            }
+        });
+
+        // sigusr1
+        pcntl_signal(SIGUSR1, function () {
+            foreach ($this->pids as $pid) {
+                Process::kill($pid, SIGTERM);
+            }
+        });
+
+        // sigusr2
+        pcntl_signal(SIGUSR2, function () {
+            foreach ($this->pids as $pid) {
+                Process::kill($pid, SIGTERM);
+            }
+        });
+    }
 
     public function addBatch(int $workerNum, callable $fn): self
     {
@@ -24,26 +62,35 @@ class Manager
         return $this;
     }
 
-    public function pids(): array
+    public function process($workerId, callable $fn): Process
     {
-        return $this->pids;
+        $process = new Process(function () use($workerId, $fn) {
+            pcntl_signal(SIGTERM, SIG_DFL);
+            pcntl_signal(SIGUSR1, SIG_DFL);
+            pcntl_signal(SIGUSR2, SIG_DFL);
+            $fn($workerId);
+        });
+        $process->start();
+        return $process;
     }
 
     public function start(): void
     {
-        $workerId = 0;
-        foreach ($this->startFuncMap as $fn) {
-            $process = new Process(function () use($fn, $workerId) {
-                $fn($workerId);
-            });
-            $process->start();
-            $this->pids[] = $process->pid;
-            $workerId++;
+        foreach ($this->startFuncMap as $workerId => $fn) {
+            $process = $this->process($workerId, $fn);
+            $this->pids[$workerId] = $process->pid;
         }
 
-        //waiting for children process end
-        for ($i = 0; $i <= $workerId; $i++) {
-            Process::wait();
+        while ($this->running) {
+            if ( ($pid = Process::waitpid(-1, $status, WNOHANG)) <= 0) {
+                sleep(1);
+                continue;
+            }
+            if (pcntl_wifexited($status) || pcntl_wifsignaled($status) || pcntl_wifstopped($status)) {
+                $workerId = array_search($pid, $this->pids, true);
+                $process = $this->process($workerId, $this->startFuncMap[$workerId]);
+                $this->pids[$workerId] = $process->pid;
+            }
         }
     }
 }

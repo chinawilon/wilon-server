@@ -1,6 +1,5 @@
 <?php
 
-declare(ticks = 1);
 
 namespace Wilon;
 
@@ -11,24 +10,19 @@ class Server
 {
 
     /**
-     * My Server Configuration
-     *
-     * @var string[]
+     * @var array
      */
-    private $config = [
-        'worker_num' => 1
-    ];
+    private $config = ['worker_num' => 1];
 
     /**
      * @var array
      */
-    private $callbacks = [];
+    private $callbacks;
 
     /**
      * @var Process
      */
     private $master;
-
     /**
      * @var string
      */
@@ -41,24 +35,20 @@ class Server
     /**
      * @var array
      */
-    private $clients = [];
+    private $clients;
 
     /**
-     * @var string
+     * @var
      */
-    private $sock = RUNTIME_PATH.'/sock';
+    private $connections;
 
-    /**
-     * @var resource
-     */
-    private $mainClient;
     /**
      * @var bool
      */
-    private $running = true;
+    private $running;
 
     /**
-     * MyServer constructor.
+     * Server constructor.
      *
      * @param string $host
      * @param int $port
@@ -68,51 +58,45 @@ class Server
         $this->host = $host;
         $this->port = $port;
 
-        // master
         $this->master = new Process(function () {
             $pm = new Manager();
-            // worker
             if ( $this->config['worker_num'] ) {
-                $pm->addBatch($this->config['worker_num'], function ($workerId){
-                    // worker start
+                $pm->addBatch($this->config['worker_num'], function (int $workerId) {
                     if ( isset($this->callbacks['WorkerStart']) ) {
-                        call_user_func($this->callbacks['WorkerStart']);
+                        call_user_func($this->callbacks['WorkerStart'], $this, $workerId);
                     }
-                    // unix socket
                     $sock = RUNTIME_PATH.'/'.$workerId.'.sock';
                     if ( file_exists($sock) ) {
                         unlink($sock);
                     }
-                    // socket bind listen
                     $server = stream_socket_server("unix://$sock", $errno, $errstr);
                     if (! $server ) {
                         Log::error("stream_socket_server error", $errno, $errstr);
                         throw new RuntimeException("stream_socket_server error");
                     }
-
                     for (;;) {
                         $conn = @stream_socket_accept($server, -1);
                         while ($data = stream_get_line($conn, 1024, "\n")) {
-                            [$event, $payload, $peer] = explode('|', $data);
+                            [$event, $peer, $payload] = explode('|', $data);
+                            $this->connections[$peer] = $conn;
                             switch ($event) {
                                 case 'connect':
-                                    if (isset($this->callbacks['connect'])) {
+                                    if ( isset($this->callbacks['connect']) ) {
                                         call_user_func($this->callbacks['connect'], $this, $peer);
                                     }
                                     break;
                                 case 'close':
-                                    if (isset($this->callbacks['close'])) {
+                                    if ( isset($this->callbacks['close']) ) {
                                         call_user_func($this->callbacks['close'], $this, $peer);
                                     }
                                     break;
                                 case 'receive':
-                                    if (isset($this->callbacks['receive'])) {
+                                    if ( isset($this->callbacks['receive']) ) {
                                         call_user_func($this->callbacks['receive'], $this, $peer, $payload);
                                     }
                                     break;
                                 default:
                                     Log::error('event', $event, 'not support');
-
                             }
                         }
                     }
@@ -122,183 +106,44 @@ class Server
         });
     }
 
-
     /**
-     * Handle the socket
-     */
-    public function handleSocket(): void
-    {
-        // Accept TCP connect
-        $server = stream_socket_server("tcp://$this->host:$this->port", $errno, $errstr);
-        if (! $server ) {
-            Log::error("stream_socket_server error", $errno, $errstr);
-            throw new RuntimeException("stream_socket_server error");
-        }
-
-        /////////// sock start /////////////
-        if ( file_exists($this->sock) ) {
-            unlink($this->sock);
-        }
-        $sock = stream_socket_server("unix://$this->sock", $errno, $errstr);
-        if (! $sock ) {
-            Log::error("stream_socket_server error", $errno, $errstr);
-            throw new RuntimeException("stream_socket_server error");
-        }
-        /////////// sock end /////////////
-
-        $connections = [];
-        $clients = [];
-        while ($this->running) {
-            // server
-            if ($conn = @stream_socket_accept($server, empty($connections) ? -1 : 0, $peer)) {
-                stream_set_blocking($conn, false);
-                $client = $this->getClient($peer);
-                $this->sendEvent($client, 'connect', $peer);
-                $connections[$peer] = $conn;
-            }
-
-            $readers = $connections;
-            $writers = null;
-            $except = null;
-            if (@stream_select($readers, $writers, $except, 0, 0)) {
-                foreach ($connections as $conn) {
-                    $peer = stream_socket_get_name($conn, true);
-                    $client = $this->getClient($peer);
-                    if (feof($conn)) {
-                        unset($connections[$peer]);
-                        $this->sendEvent($client, 'close', $peer);
-                        continue;
-                    }
-                    if ($data = fread($conn, 1024)) {
-                        $this->sendEvent($client, 'receive', $peer, $data);
-                    }
-                }
-            }
-
-            // sock accept
-            if ($conn = @stream_socket_accept($sock, 0, $peer)) {
-                stream_set_blocking($conn, false);
-                $clients[] = $conn;
-            }
-            // continue if not accept
-            if ( count($clients) === 0 ) {
-                continue;
-            }
-            $readers = $clients;
-            $writers = null;
-            $except = null;
-            if (@stream_select($readers, $writers, $except, 0, 0)) {
-                foreach ($clients as $client) {
-                    if ($data = stream_get_line($client, 1024, "\n")) {
-                        [$event, $payload, $peer] = explode('|', $data);
-                        if (! isset($connections[$peer])) {
-                            continue;
-                        }
-                        $conn = $connections[$peer];
-                        switch ($event) {
-                            case 'send':
-                                fwrite($conn, $payload);
-                                break;
-                            case 'close':
-                                fclose($conn);
-                                unset($connections[$peer]);
-                                break;
-                            default:
-                                Log::error('event', $event, 'not support');
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-
-    /**
-     * @param string $peer
+     * Send the msg event
+     *
+     * @param $peer
      * @param string $msg
      * @return false|int
      */
-    public function send(string $peer, string $msg)
+    public function send($peer, string $msg)
     {
-        $client = $this->getMainClient();
-        return $this->sendEvent($client, 'send', $peer, $msg);
+        $conn = $this->connections[$peer];
+        return $this->sendEvent($conn, 'send', $peer, $msg);
     }
 
     /**
-     * @param string $peer
-     * @return bool
-     */
-    public function close(string $peer): bool
-    {
-        $client = $this->getMainClient();
-        return $this->sendEvent($client, 'close', $peer);
-    }
-
-    /**
-     * Get main client
-     *
-     * @return false|resource
-     */
-    public function getMainClient()
-    {
-        if ($this->mainClient) {
-            return $this->mainClient;
-        }
-        $client = @stream_socket_client("unix://$this->sock", $errno, $errstr);
-        if (!$client) {
-            Log::error("stream_socket_client error", $errno, $errstr);
-            throw new RuntimeException("stream_socket_client error");
-        }
-        return $this->mainClient = $client;
-    }
-
-    /**
-     * @param resource $client
-     * @param string $event
-     * @param string $payload
-     * @param string $peer
-     * @return false|int
-     */
-    public function sendEvent($client, string $event, string $peer, string $payload = '')
-    {
-        $payload = implode('|', [$event, $payload, $peer]);
-        return fwrite($client, $payload."\n");
-    }
-
-    /**
-     * Get the sock
-     *
-     * @param string $peer
-     * @return string
-     */
-    public function getSock(string $peer): string
-    {
-        $workerId = crc32($peer) % $this->config['worker_num'];
-        return RUNTIME_PATH.'/'.$workerId.'.sock';
-    }
-
-    /**
-     * Get the client
+     * Close the conn event
      *
      * @param $peer
-     * @return mixed
+     * @return false|int
      */
-    public function getClient($peer)
+    public function close($peer)
     {
-        $sock = $this->getSock($peer);
-        if (! isset( $this->clients[$sock]) ) {
-            $client = @stream_socket_client("unix://$sock", $errno, $errstr);
-            if (!$client) {
-                Log::error("stream_socket_client error", $errno, $errstr);
-                throw new RuntimeException("stream_socket_client error");
-            }
-            $this->clients[$sock] = $client;
-        }
-        return $this->clients[$sock];
+        $conn = $this->connections[$peer];
+        return $this->sendEvent($conn, 'close', $peer);
     }
 
     /**
-     * Set the configuration
+     * Server bind event
+     *
+     * @param $event
+     * @param callable $fn
+     */
+    public function on($event, callable $fn): void
+    {
+        $this->callbacks[$event] = $fn;
+    }
+
+    /**
+     * Server configuration
      *
      * @param array $config
      */
@@ -307,15 +152,112 @@ class Server
         $this->config = array_merge($this->config, $config);
     }
 
+
     /**
-     * Listen the event
-     *
-     * @param $event
-     * @param callable $fn
+     * Handle the request
      */
-    public function on($event, callable $fn): void
+    public function handleSocket(): void
     {
-        $this->callbacks[$event] = $fn;
+        $server = stream_socket_server("tcp://$this->host:$this->port", $errno, $errstr);
+        if (! $server ) {
+            Log::error("stream_socket_server error", $errno, $errstr);
+            throw new RuntimeException("stream_socket_server error");
+        }
+
+        $connections = [];
+        while ($this->running) {
+            if ($conn = @stream_socket_accept($server, empty($connections) ? -1 : 0, $peer)) {
+                stream_set_blocking($conn, false);
+                $client = $this->getClient($peer);
+                $this->sendEvent($client, 'connect', $peer);
+                $connections[$peer] = $conn;
+                $connections[] = $client;
+            }
+            $readers = $connections;
+            $writers = null;
+            $except = null;
+            if (@stream_select($readers, $writers, $except, 0, 0)) {
+                foreach ($connections as $conn) {
+                    // client
+                    if (in_array($conn, $this->clients, true)) {
+                        if ($data = stream_get_line($conn, 1024, "\n")) {
+                            [$event, $peer, $payload] = explode('|', $data);
+                            switch ($event) {
+                                case 'send':
+                                    $conn = $connections[$peer];
+                                    fwrite($conn, $payload);
+                                    break;
+                                case 'close':
+                                    unset($connections[$peer]);
+                                    fclose($connections[$peer]);
+                                    break;
+                                default:
+                                    Log::error('event', $event, 'not support');
+                            }
+                        }
+                        continue;
+                    }
+
+                    // conn
+                    $peer = stream_socket_get_name($conn, true);
+                    if (feof($conn)) {
+                        $client = $this->getClient($peer);
+                        $this->sendEvent($client, 'close', $peer);
+                        unset($connections[$peer]);
+                        continue;
+                    }
+                    if ($data = fread($conn, 1024)) {
+                        $client = $this->getClient($peer);
+                        $this->sendEvent($client, 'receive', $peer, $data);
+                    }
+                }
+            }
+
+        }
+    }
+
+    public function getClient(string $peer)
+    {
+        $sock = $this->getSock($peer);
+        if (! isset($this->clients[$peer]) ) {
+            $client = @stream_socket_client("unix://$sock", $errno, $errstr);
+            stream_set_blocking($client, false);
+            if (! $client ) {
+                Log::error("stream_socket_client error", $errno, $errstr);
+                throw new RuntimeException("stream_socket_client error");
+            }
+            $this->clients[$peer] = $client;
+        }
+
+        return $this->clients[$peer];
+    }
+
+    /**
+     * Get the socket
+     *
+     * @param string $peer
+     * @return string
+     */
+    public function getSock(string $peer): string
+    {
+        $workerId = crc32($peer) % $this->config['worker_num'];
+        return RUNTIME_PATH. '/' . $workerId. '.sock';
+    }
+
+
+    /**
+     * Send event
+     *
+     * @param $client
+     * @param string $event
+     * @param string $peer
+     * @param string $payload
+     * @return false|int
+     */
+    public function sendEvent($client, string $event, string $peer, string $payload = '')
+    {
+        $data = implode('|', [$event, $peer, $payload]);
+        return fwrite($client, $data."\n");
     }
 
     /**
@@ -335,23 +277,22 @@ class Server
         });
     }
 
+
     /**
-     * Start the wilon
-     *
-     * @return mixed
+     * Start the server
      */
-    public function start()
+    public function start(): void
     {
-        // Setup the master process
+        // master process
         $this->master->start();
 
         // Handle signal
         $this->handleSignal();
 
-        // Handle socket wilon
+        // handle request
         $this->handleSocket();
 
-        // wait children process end
+        // wait manager process end
         Process::wait();
     }
 }

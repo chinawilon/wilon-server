@@ -4,8 +4,6 @@ declare(ticks = 1);
 
 namespace Wilon;
 
-use Log;
-
 class Process
 {
     /**
@@ -32,7 +30,7 @@ class Process
         return pcntl_wait($status);
     }
 
-    public static function signal($signo, callable $fn): bool
+    public static function signal($signo, $fn): bool
     {
         return pcntl_signal($signo, $fn);
     }
